@@ -35,4 +35,15 @@ public final class Dates {
         }
         return null;
     }
+
+    /** Parse an email RFC 1123 date header and normalize its timezone offset to IST. */
+    public static OffsetDateTime parseEmailDate(String dateHeader) {
+        if (dateHeader == null || dateHeader.isBlank()) return null;
+        try {
+            OffsetDateTime dt = OffsetDateTime.parse(dateHeader.trim(), DateTimeFormatter.RFC_1123_DATE_TIME);
+            return dt.withOffsetSameInstant(IST);
+        } catch (DateTimeParseException ignored) {
+            return null;
+        }
+    }
 }
