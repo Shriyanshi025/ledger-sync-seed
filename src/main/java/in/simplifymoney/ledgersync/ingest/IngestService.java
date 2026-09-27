@@ -1,8 +1,6 @@
 package in.simplifymoney.ledgersync.ingest;
 
 import in.simplifymoney.ledgersync.json.Json;
-import in.simplifymoney.ledgersync.model.Category;
-import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.model.RawMessage;
 import in.simplifymoney.ledgersync.parse.ParsedTxn;
@@ -20,10 +18,6 @@ import java.util.stream.Stream;
 
 /**
  * Reads a corpus of raw messages and puts transactions in the ledger.
- *
- * This is the naive version. It parses each message on its own and saves
- * whatever comes back. It does not ask whether two messages describe the same
- * transaction, and it decides the category from the direction alone.
  */
 public final class IngestService {
 
@@ -37,18 +31,23 @@ public final class IngestService {
 
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
-        int parsed = 0;
         int skipped = 0;
+        List<ParsedTxn> parsedTxns = new ArrayList<>();
         for (RawMessage m : messages) {
             Optional<ParsedTxn> p = parsers.parse(m);
             if (p.isEmpty()) {
                 skipped++;
                 continue;
             }
-            store.save(toTransaction(p.get()));
-            parsed++;
+            parsedTxns.add(p.get());
         }
-        return new Stats(messages.size(), parsed, skipped);
+
+        List<NormalizedTxn> correlated = TransactionCorrelator.correlate(parsedTxns);
+        List<NormalizedTxn> classified = in.simplifymoney.ledgersync.classify.TransactionClassifier.classify(correlated, messages);
+        for (NormalizedTxn t : classified) {
+            store.save(t);
+        }
+        return new Stats(messages.size(), classified.size(), skipped);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
@@ -66,12 +65,6 @@ public final class IngestService {
             }
         }
         return out;
-    }
-
-    private NormalizedTxn toTransaction(ParsedTxn p) {
-        Category c = p.direction() == Direction.DEBIT ? Category.SPEND : Category.INCOME;
-        return new NormalizedTxn(p.accountLast4(), p.occurredAt(), p.direction(),
-                p.amount(), c, p.merchant(), List.of(p.sourceMessageId()));
     }
 
     public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped) {}

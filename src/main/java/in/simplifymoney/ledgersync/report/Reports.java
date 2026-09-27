@@ -30,21 +30,37 @@ public final class Reports {
 
             BigDecimal spend = ZERO;
             BigDecimal income = ZERO;
+            int microCount = 0;
+            BigDecimal microTotal = ZERO;
+            BigDecimal transferredOut = ZERO;
+            BigDecimal transferredIn = ZERO;
+
             for (NormalizedTxn t : ledger) {
                 if (!t.accountLast4().equals(acct)) continue;
-                if (t.direction() == Direction.DEBIT) spend = spend.add(t.amount());
-                else income = income.add(t.amount());
+                switch (t.category()) {
+                    case SPEND -> spend = spend.add(t.amount());
+                    case INCOME -> income = income.add(t.amount());
+                    case MICRO -> {
+                        microCount++;
+                        microTotal = microTotal.add(t.amount());
+                    }
+                    case TRANSFER -> {
+                        if (t.direction() == Direction.DEBIT) {
+                            transferredOut = transferredOut.add(t.amount());
+                        } else {
+                            transferredIn = transferredIn.add(t.amount());
+                        }
+                    }
+                }
             }
 
             Map<String, Object> a = new LinkedHashMap<>();
             a.put("spend", spend.toPlainString());
             a.put("income", income.toPlainString());
-            // TODO micro spends are still counted inside spend, and are not rolled up
-            a.put("micro_count", 0);
-            a.put("micro_total", ZERO.toPlainString());
-            // TODO transfers are still counted as spend and income
-            a.put("transferred_out", ZERO.toPlainString());
-            a.put("transferred_in", ZERO.toPlainString());
+            a.put("micro_count", microCount);
+            a.put("micro_total", microTotal.toPlainString());
+            a.put("transferred_out", transferredOut.toPlainString());
+            a.put("transferred_in", transferredIn.toPlainString());
             accounts.put(acct, a);
         }
         Map<String, Object> doc = new LinkedHashMap<>();
