@@ -42,6 +42,20 @@ class AmountsTest {
     }
 
     @Test
+    void readsWholeRupeeTransactionAmountInsteadOfLaterBalance() {
+        assertEquals(new BigDecimal("5.00"),
+                Amounts.first("Rs.5 debited from a/c **4821 on 04-07-26 at "
+                        + "07:19 to UPI/WATER CAN. Avl Bal: Rs.92,213.10."));
+    }
+
+    @Test
+    void readsWholeRupeesWithoutDecimals() {
+        assertEquals(new BigDecimal("20.00"), Amounts.first("Rs 20 debited from a/c **4821"));
+        assertEquals(new BigDecimal("35.00"), Amounts.first("Rs.35 debited from a/c **4821"));
+        assertEquals(new BigDecimal("249.00"), Amounts.first("Rs 249 debited from a/c **4821"));
+    }
+
+    @Test
     void ignoresAMessageWithNoAmountAtAll() {
         assertEquals(null, Amounts.first("Your Swiggy order is on the way!"));
     }
