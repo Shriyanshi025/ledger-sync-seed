@@ -7,6 +7,7 @@ import in.simplifymoney.ledgersync.report.Reports;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -23,18 +24,17 @@ class ProvenanceLifecycleTest {
         try (SqlLedgerStore store = new SqlLedgerStore(dbFile)) {
             store.migrate(migrations);
 
-            // 1. Raw count after migration should be 10 legacy rows
+            // 1. Raw count after migration should be 10 legacy rows (9 LEGACY + 1 INCIDENT_EVIDENCE)
             assertEquals(10, store.all().size(), "Raw all() should return 10 legacy rows after migration");
 
-            // 2. Canonical submission should only return m-legacy-0041 (INCIDENT_EVIDENCE)
+            // 2. Canonical submission should return 0 before corpus ingestion
             List<NormalizedTxn> canonical = store.canonicalForSubmission();
-            assertEquals(1, canonical.size(), "Canonical submission view after migration should only contain INCIDENT_EVIDENCE row");
-            assertTrue(canonical.get(0).sourceMessageIds().contains("m-legacy-0041"), "Canonical row must be m-legacy-0041");
+            assertEquals(0, canonical.size(), "Canonical submission view before corpus ingestion should be 0");
         }
     }
 
     @Test
-    void testFreshMigrateAndIngestProducesExactCounts(@TempDir Path tempDir) throws Exception {
+    void testFreshMigrateAndIngestProducesExactCountsAndTotals(@TempDir Path tempDir) throws Exception {
         Path dbFile = tempDir.resolve("ledger-test");
         Path migrations = Path.of("db", "migration");
         Path corpus = Path.of("fixtures", "corpus-a.jsonl");
@@ -43,31 +43,55 @@ class ProvenanceLifecycleTest {
             store.migrate(migrations);
             new IngestService(new Parsers(), store).ingestFile(corpus);
 
-            // 5 & 6. Raw count should be 266, canonical submission count should be 257
             List<NormalizedTxn> raw = store.all();
             List<NormalizedTxn> canonical = store.canonicalForSubmission();
 
-            assertEquals(266, raw.size(), "Raw database count must be 266 (10 legacy + 256 corpus)");
-            assertEquals(257, canonical.size(), "Canonical submission count must be 257 (1 incident evidence + 256 corpus)");
+            // 1. Raw physical database count is 266 (10 legacy/incident + 256 corpus writes)
+            assertEquals(266, raw.size(), "Raw database count must be 266 physical rows (10 legacy + 256 corpus)");
 
-            // 4. Verify m-legacy-0041 is included in canonical view
+            // 2. Canonical submission count is 256 corpus transactions
+            assertEquals(256, canonical.size(), "Canonical submission count must be 256");
+
+            // 3. Verify Task 3 incident evidence (m-legacy-0041 with 92213.10) is excluded from canonical view
             boolean hasIncidentEvidence = canonical.stream()
                     .anyMatch(t -> t.sourceMessageIds().contains("m-legacy-0041"));
-            assertTrue(hasIncidentEvidence, "Canonical view must include Task 3 incident evidence (m-legacy-0041)");
+            assertFalse(hasIncidentEvidence, "Canonical view must NOT include Task 3 incident evidence m-legacy-0041");
 
-            // 3. Verify ordinary legacy rows are excluded from canonical view
-            boolean hasOrdinaryLegacy = canonical.stream()
-                    .anyMatch(t -> t.sourceMessageIds().contains("m-legacy-0001"));
-            assertFalse(hasOrdinaryLegacy, "Canonical view must exclude ordinary LEGACY rows");
+            // 4. Verify m-legacy-0041 remains preserved in raw database
+            boolean hasIncidentEvidenceInRaw = raw.stream()
+                    .anyMatch(t -> t.sourceMessageIds().contains("m-legacy-0041"));
+            assertTrue(hasIncidentEvidenceInRaw, "Raw database must preserve Task 3 incident evidence m-legacy-0041");
 
-            // 7. Canonical account/category summaries are generated from canonical view
+            // 5. Canonical account totals match corpus-a-totals.json exactly
             Map<String, Object> summary = Reports.summary(canonical);
             @SuppressWarnings("unchecked")
             Map<String, Object> accounts = (Map<String, Object>) summary.get("accounts");
-            assertNotNull(accounts.get("4821"));
-            assertNotNull(accounts.get("9075"));
 
-            // 12. Reconciliation reports ₹7,500 gap as unrepresented bank transaction without fabricating a row
+            @SuppressWarnings("unchecked")
+            Map<String, Object> a4821 = (Map<String, Object>) accounts.get("4821");
+            BigDecimal spend4821 = new BigDecimal(String.valueOf(a4821.get("spend")));
+            BigDecimal micro4821 = new BigDecimal(String.valueOf(a4821.get("micro_total")));
+            assertEquals("87068.38", spend4821.add(micro4821).toPlainString(), "Account 4821 total spend (spend + micro) must match fixture 87068.38");
+            assertEquals("84710.87", a4821.get("spend"), "Account 4821 non-micro spend must be 84710.87");
+            assertEquals("101340.83", a4821.get("income"), "Account 4821 income must match fixture 101340.83");
+            assertEquals(52, a4821.get("micro_count"));
+            assertEquals("2357.51", a4821.get("micro_total"));
+            assertEquals("25000.00", a4821.get("transferred_out"));
+            assertEquals("6000.00", a4821.get("transferred_in"));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> a9075 = (Map<String, Object>) accounts.get("9075");
+            BigDecimal spend9075 = new BigDecimal(String.valueOf(a9075.get("spend")));
+            BigDecimal micro9075 = new BigDecimal(String.valueOf(a9075.get("micro_total")));
+            assertEquals("39058.11", spend9075.add(micro9075).toPlainString(), "Account 9075 total spend (spend + micro) must match fixture 39058.11");
+            assertEquals("36971.77", a9075.get("spend"), "Account 9075 non-micro spend must be 36971.77");
+            assertEquals("41450.33", a9075.get("income"), "Account 9075 income must match fixture 41450.33");
+            assertEquals(45, a9075.get("micro_count"));
+            assertEquals("2086.34", a9075.get("micro_total"));
+            assertEquals("6000.00", a9075.get("transferred_out"));
+            assertEquals("25000.00", a9075.get("transferred_in"));
+
+            // 6. Reconciliation reports ₹7,500 gap as unrepresented bank transaction without fabricating a row
             Map<String, Object> recon = Reports.reconciliation(canonical);
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> discrepancies = (List<Map<String, Object>>) recon.get("discrepancies");
@@ -89,14 +113,13 @@ class ProvenanceLifecycleTest {
             store.migrate(migrations);
             var ingestService = new IngestService(new Parsers(), store);
 
-            // 8. Rerunning ingestion does not create duplicate CORPUS rows
             ingestService.ingestFile(corpus);
             assertEquals(266, store.all().size());
-            assertEquals(257, store.canonicalForSubmission().size());
+            assertEquals(256, store.canonicalForSubmission().size());
 
             ingestService.ingestFile(corpus);
             assertEquals(266, store.all().size(), "Rerunning ingestion must not increase raw count");
-            assertEquals(257, store.canonicalForSubmission().size(), "Rerunning ingestion must not increase canonical count");
+            assertEquals(256, store.canonicalForSubmission().size(), "Rerunning ingestion must not increase canonical count");
         }
     }
 }
