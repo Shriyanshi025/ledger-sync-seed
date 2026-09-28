@@ -90,6 +90,9 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
             // Post-migration deduplication cleanup & unique index enforcement
             st.execute("ALTER TABLE ledger ADD COLUMN IF NOT EXISTS dedup_key VARCHAR(300)");
+            st.execute("ALTER TABLE ledger ADD COLUMN IF NOT EXISTS source_kind VARCHAR(30) DEFAULT 'CORPUS'");
+            st.execute("UPDATE ledger SET source_kind = 'LEGACY' WHERE source_message_ids LIKE 'm-legacy-%'");
+            st.execute("UPDATE ledger SET source_kind = 'INCIDENT_EVIDENCE' WHERE source_message_ids LIKE '%m-legacy-0041%'");
 
             // Populate dedup_key for any rows missing it
             try (Statement s = conn.createStatement();
@@ -207,8 +210,8 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO ledger(account_last4, occurred_at, direction, amount,"
-                        + " category, merchant, source_message_ids, dedup_key)"
-                        + " VALUES (?,?,?,?,?,?,?,?)")) {
+                        + " category, merchant, source_message_ids, dedup_key, source_kind)"
+                        + " VALUES (?,?,?,?,?,?,?,?,'CORPUS')")) {
             ps.setString(1, t.accountLast4());
             ps.setString(2, t.occurredAt().toString());
             ps.setString(3, t.direction().name());
@@ -245,6 +248,32 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             }
         } catch (SQLException e) {
             throw new IllegalStateException("could not read the ledger", e);
+        }
+        return out;
+    }
+
+    @Override
+    public List<NormalizedTxn> canonicalForSubmission() {
+        List<NormalizedTxn> out = new ArrayList<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT account_last4, occurred_at, direction, amount, category,"
+                             + " merchant, source_message_ids FROM ledger"
+                             + " WHERE source_kind IN ('CORPUS', 'INCIDENT_EVIDENCE')"
+                             + " ORDER BY occurred_at")) {
+            while (rs.next()) {
+                out.add(new NormalizedTxn(
+                        rs.getString(1),
+                        OffsetDateTime.parse(rs.getString(2)),
+                        Direction.valueOf(rs.getString(3)),
+                        rs.getBigDecimal(4).setScale(2),
+                        Category.valueOf(rs.getString(5)),
+                        rs.getString(6),
+                        Arrays.stream(rs.getString(7).split(","))
+                                .filter(s -> !s.isBlank()).toList()));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not read canonical ledger", e);
         }
         return out;
     }

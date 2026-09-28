@@ -54,7 +54,7 @@ public final class App {
                 Path out = Path.of(args[1]);
                 Files.createDirectories(out);
                 try (SqlLedgerStore store = new SqlLedgerStore(DB)) {
-                    var ledger = store.all();
+                    var ledger = store.canonicalForSubmission();
                     Files.writeString(out.resolve("ledger.json"),
                             Json.writePretty(Reports.ledgerDocument(ledger)));
                     Files.writeString(out.resolve("summary.json"),

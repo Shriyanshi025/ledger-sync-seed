@@ -15,5 +15,9 @@ public interface LedgerStore {
 
     List<NormalizedTxn> all();
 
+    default List<NormalizedTxn> canonicalForSubmission() {
+        return all();
+    }
+
     long count();
 }
