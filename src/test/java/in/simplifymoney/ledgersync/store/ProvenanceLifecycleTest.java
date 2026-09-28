@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -33,7 +34,7 @@ class ProvenanceLifecycleTest {
     }
 
     @Test
-    void testFreshMigrateAndIngestProducesExactCounts(@TempDir Path tempDir) {
+    void testFreshMigrateAndIngestProducesExactCounts(@TempDir Path tempDir) throws Exception {
         Path dbFile = tempDir.resolve("ledger-test");
         Path migrations = Path.of("db", "migration");
         Path corpus = Path.of("fixtures", "corpus-a.jsonl");
@@ -60,22 +61,26 @@ class ProvenanceLifecycleTest {
             assertFalse(hasOrdinaryLegacy, "Canonical view must exclude ordinary LEGACY rows");
 
             // 7. Canonical account/category summaries are generated from canonical view
-            var summary = Reports.summary(canonical);
-            assertNotNull(summary.accounts().get("4821"));
-            assertNotNull(summary.accounts().get("9075"));
+            Map<String, Object> summary = Reports.summary(canonical);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> accounts = (Map<String, Object>) summary.get("accounts");
+            assertNotNull(accounts.get("4821"));
+            assertNotNull(accounts.get("9075"));
 
             // 12. Reconciliation reports ₹7,500 gap as unrepresented bank transaction without fabricating a row
-            var recon = Reports.reconciliation(canonical);
-            boolean hasUnrepresented7500 = recon.discrepancies().stream()
-                    .anyMatch(d -> d.accountLast4().equals("4821")
-                            && d.amount().toPlainString().equals("7500.00")
-                            && d.note().contains("Unrepresented bank transaction"));
+            Map<String, Object> recon = Reports.reconciliation(canonical);
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> discrepancies = (List<Map<String, Object>>) recon.get("discrepancies");
+            boolean hasUnrepresented7500 = discrepancies.stream()
+                    .anyMatch(d -> "4821".equals(d.get("account_last4"))
+                            && "7500.00".equals(d.get("amount"))
+                            && String.valueOf(d.get("note")).contains("Unrepresented bank transaction"));
             assertTrue(hasUnrepresented7500, "₹7,500 gap must be honestly reported as unrepresented bank transaction");
         }
     }
 
     @Test
-    void testRerunningIngestionIsRepeatSafe(@TempDir Path tempDir) {
+    void testRerunningIngestionIsRepeatSafe(@TempDir Path tempDir) throws Exception {
         Path dbFile = tempDir.resolve("ledger-test");
         Path migrations = Path.of("db", "migration");
         Path corpus = Path.of("fixtures", "corpus-a.jsonl");
