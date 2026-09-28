@@ -40,6 +40,22 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
         }
     }
 
+    public static String computeDedupKey(NormalizedTxn t) {
+        return computeDedupKey(
+                t.accountLast4(),
+                t.occurredAt().toString(),
+                t.direction().name(),
+                t.amount(),
+                t.merchant()
+        );
+    }
+
+    public static String computeDedupKey(String accountLast4, String occurredAt, String direction, BigDecimal amount, String merchant) {
+        String m = (merchant == null || merchant.isBlank()) ? "NONE" : merchant.trim().toLowerCase();
+        String amtStr = amount != null ? amount.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString() : "0.00";
+        return accountLast4 + "|" + occurredAt + "|" + direction + "|" + amtStr + "|" + m;
+    }
+
     /** Applies every db/migration/V*.sql in filename order. */
     public void migrate(Path migrationDir) {
         try (Statement st = conn.createStatement()) {
@@ -71,25 +87,139 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                 }
                 System.out.println("applied " + name);
             }
+
+            // Post-migration deduplication cleanup & unique index enforcement
+            st.execute("ALTER TABLE ledger ADD COLUMN IF NOT EXISTS dedup_key VARCHAR(300)");
+
+            // Populate dedup_key for any rows missing it
+            try (Statement s = conn.createStatement();
+                 ResultSet rs = s.executeQuery("SELECT id, account_last4, occurred_at, direction, amount, merchant FROM ledger WHERE dedup_key IS NULL")) {
+                while (rs.next()) {
+                    long id = rs.getLong("id");
+                    String k = computeDedupKey(
+                            rs.getString("account_last4"),
+                            rs.getString("occurred_at"),
+                            rs.getString("direction"),
+                            rs.getBigDecimal("amount"),
+                            rs.getString("merchant")
+                    );
+                    try (PreparedStatement up = conn.prepareStatement("UPDATE ledger SET dedup_key = ? WHERE id = ?")) {
+                        up.setString(1, k);
+                        up.setLong(2, id);
+                        up.executeUpdate();
+                    }
+                }
+            }
+
+            // Detect and resolve legacy duplicate dedup_keys before creating unique index
+            try (Statement s = conn.createStatement();
+                 ResultSet rs = s.executeQuery("SELECT dedup_key, COUNT(*) as cnt FROM ledger GROUP BY dedup_key HAVING COUNT(*) > 1")) {
+                List<String> dupKeys = new ArrayList<>();
+                while (rs.next()) {
+                    dupKeys.add(rs.getString("dedup_key"));
+                }
+                for (String dupKey : dupKeys) {
+                    try (PreparedStatement findPs = conn.prepareStatement(
+                            "SELECT id, source_message_ids FROM ledger WHERE dedup_key = ? ORDER BY id")) {
+                        findPs.setString(1, dupKey);
+                        try (ResultSet dupRs = findPs.executeQuery()) {
+                            List<Long> ids = new ArrayList<>();
+                            java.util.Set<String> allSourceIds = new java.util.TreeSet<>();
+                            while (dupRs.next()) {
+                                ids.add(dupRs.getLong("id"));
+                                String sIds = dupRs.getString("source_message_ids");
+                                if (sIds != null) {
+                                    Arrays.stream(sIds.split(","))
+                                            .map(String::trim)
+                                            .filter(str -> !str.isEmpty())
+                                            .forEach(allSourceIds::add);
+                                }
+                            }
+                            if (ids.size() > 1) {
+                                long primaryId = ids.get(0);
+                                String mergedSourceIds = String.join(",", allSourceIds);
+                                try (PreparedStatement updatePrimary = conn.prepareStatement(
+                                        "UPDATE ledger SET source_message_ids = ? WHERE id = ?")) {
+                                    updatePrimary.setString(1, mergedSourceIds);
+                                    updatePrimary.setLong(2, primaryId);
+                                    updatePrimary.executeUpdate();
+                                }
+                                for (int i = 1; i < ids.size(); i++) {
+                                    try (PreparedStatement del = conn.prepareStatement("DELETE FROM ledger WHERE id = ?")) {
+                                        del.setLong(1, ids.get(i));
+                                        del.executeUpdate();
+                                    }
+                                }
+                                System.out.println("Migration merged legacy duplicate dedup_key [" + dupKey + "] -> combined source_message_ids: " + mergedSourceIds);
+                            }
+                        }
+                    }
+                }
+            }
+
+            st.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_dedup_key ON ledger (dedup_key)");
         } catch (Exception e) {
             throw new IllegalStateException("migration failed", e);
         }
     }
 
     @Override
-    public void save(NormalizedTxn t) {
+    public boolean save(NormalizedTxn t) {
+        String key = computeDedupKey(t);
+        List<String> newSourceIds = t.sourceMessageIds() != null ? t.sourceMessageIds() : List.of();
+
+        try (PreparedStatement selectPs = conn.prepareStatement(
+                "SELECT id, source_message_ids FROM ledger WHERE dedup_key = ?")) {
+            selectPs.setString(1, key);
+            try (ResultSet rs = selectPs.executeQuery()) {
+                if (rs.next()) {
+                    long existingId = rs.getLong("id");
+                    String existingSourceIdsStr = rs.getString("source_message_ids");
+                    List<String> existingList = existingSourceIdsStr != null
+                            ? Arrays.stream(existingSourceIdsStr.split(","))
+                                .map(String::trim)
+                                .filter(s -> !s.isEmpty())
+                                .toList()
+                            : List.of();
+
+                    java.util.Set<String> combinedSet = new java.util.TreeSet<>(existingList);
+                    combinedSet.addAll(newSourceIds);
+                    List<String> combinedList = new ArrayList<>(combinedSet);
+
+                    String newMergedSourceIdsStr = String.join(",", combinedList);
+
+                    if (!newMergedSourceIdsStr.equals(existingSourceIdsStr)) {
+                        try (PreparedStatement updatePs = conn.prepareStatement(
+                                "UPDATE ledger SET source_message_ids = ?, category = ?, merchant = ? WHERE id = ?")) {
+                            updatePs.setString(1, newMergedSourceIdsStr);
+                            updatePs.setString(2, t.category().name());
+                            updatePs.setString(3, t.merchant());
+                            updatePs.setLong(4, existingId);
+                            updatePs.executeUpdate();
+                        }
+                    }
+                    return false;
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not query ledger for dedup_key " + key, e);
+        }
+
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO ledger(account_last4, occurred_at, direction, amount,"
-                        + " category, merchant, source_message_ids)"
-                        + " VALUES (?,?,?,?,?,?,?)")) {
+                        + " category, merchant, source_message_ids, dedup_key)"
+                        + " VALUES (?,?,?,?,?,?,?,?)")) {
             ps.setString(1, t.accountLast4());
             ps.setString(2, t.occurredAt().toString());
             ps.setString(3, t.direction().name());
-            ps.setBigDecimal(4, t.amount());
+            ps.setBigDecimal(4, t.amount().setScale(2, java.math.RoundingMode.HALF_UP));
             ps.setString(5, t.category().name());
             ps.setString(6, t.merchant());
-            ps.setString(7, String.join(",", t.sourceMessageIds()));
+            String sortedSourceIds = String.join(",", new java.util.TreeSet<>(newSourceIds));
+            ps.setString(7, sortedSourceIds);
+            ps.setString(8, key);
             ps.executeUpdate();
+            return true;
         } catch (SQLException e) {
             throw new IllegalStateException("could not save " + t, e);
         }

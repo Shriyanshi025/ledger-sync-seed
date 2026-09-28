@@ -113,9 +113,9 @@ public final class TransactionClassifier {
         String m1 = t1.merchant().toUpperCase(Locale.ROOT);
         String m2 = t2.merchant().toUpperCase(Locale.ROOT);
 
-        // Explicit same-owner evidence: e.g. PARAG KAPOOR / PARAG / KAPOOR
-        boolean m1HasOwner = m1.contains("PARAG") || m1.contains("KAPOOR");
-        boolean m2HasOwner = m2.contains("PARAG") || m2.contains("KAPOOR");
+        // Explicit same-owner evidence: e.g. PARAG KAPOOR / PARAG / KAPOOR / SELF / OWN
+        boolean m1HasOwner = isOwnerString(m1);
+        boolean m2HasOwner = isOwnerString(m2);
 
         if (m1HasOwner && m2HasOwner) {
             return true;
@@ -133,12 +133,17 @@ public final class TransactionClassifier {
             RawMessage m = messageMap.get(srcId);
             if (m != null) {
                 String body = m.body().toUpperCase(Locale.ROOT);
-                if (body.contains("PARAG") || body.contains("KAPOOR")) {
+                if (isOwnerString(body)) {
                     return true;
                 }
             }
         }
         return false;
+    }
+
+    private static boolean isOwnerString(String s) {
+        return s.contains("PARAG") || s.contains("KAPOOR") || s.contains("SELF")
+                || s.contains("OWN ACCOUNT") || s.contains("OWN ACCT") || s.contains("OWN A/C");
     }
 
     private static boolean hasUpiEvidence(NormalizedTxn t, Map<String, RawMessage> messageMap) {

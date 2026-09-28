@@ -11,7 +11,7 @@ import java.util.List;
  */
 public interface LedgerStore {
 
-    void save(NormalizedTxn txn);
+    boolean save(NormalizedTxn txn);
 
     List<NormalizedTxn> all();
 

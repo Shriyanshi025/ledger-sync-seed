@@ -112,4 +112,28 @@ class TransactionClassifierTest {
         assertEquals(Category.MICRO, classified.get(0).category());
         assertEquals(List.of("m1", "m2"), classified.get(0).sourceMessageIds());
     }
+
+    @Test
+    void classifiesExplicitPairedTransferWithSelfRemarkAsTransfer() {
+        NormalizedTxn t1 = new NormalizedTxn("4821", NOW, Direction.DEBIT,
+                new BigDecimal("17000.00"), Category.SPEND, "TRANSFER SELF", List.of("m1"));
+        NormalizedTxn t2 = new NormalizedTxn("9075", NOW.plusMinutes(1), Direction.CREDIT,
+                new BigDecimal("17000.00"), Category.INCOME, "NEFT INWARD SELF", List.of("m2"));
+
+        List<NormalizedTxn> classified = TransactionClassifier.classify(List.of(t1, t2));
+        assertEquals(Category.TRANSFER, classified.get(0).category());
+        assertEquals(Category.TRANSFER, classified.get(1).category());
+    }
+
+    @Test
+    void rejectsFalsePositiveWithTownOrBrownInMerchantName() {
+        NormalizedTxn t1 = new NormalizedTxn("4821", NOW, Direction.DEBIT,
+                new BigDecimal("500.00"), Category.SPEND, "BROWN TOWN STORE", List.of("m1"));
+        NormalizedTxn t2 = new NormalizedTxn("9075", NOW.plusMinutes(1), Direction.CREDIT,
+                new BigDecimal("500.00"), Category.INCOME, "BROWN TOWN REFUND", List.of("m2"));
+
+        List<NormalizedTxn> classified = TransactionClassifier.classify(List.of(t1, t2));
+        assertEquals(Category.SPEND, classified.get(0).category());
+        assertEquals(Category.INCOME, classified.get(1).category());
+    }
 }

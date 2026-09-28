@@ -44,10 +44,13 @@ public final class IngestService {
 
         List<NormalizedTxn> correlated = TransactionCorrelator.correlate(parsedTxns);
         List<NormalizedTxn> classified = in.simplifymoney.ledgersync.classify.TransactionClassifier.classify(correlated, messages);
+        int written = 0;
         for (NormalizedTxn t : classified) {
-            store.save(t);
+            if (store.save(t)) {
+                written++;
+            }
         }
-        return new Stats(messages.size(), classified.size(), skipped);
+        return new Stats(messages.size(), written, skipped);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {

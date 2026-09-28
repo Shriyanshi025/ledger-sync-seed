@@ -4,6 +4,9 @@ import in.simplifymoney.ledgersync.ingest.IngestService;
 import in.simplifymoney.ledgersync.json.Json;
 import in.simplifymoney.ledgersync.parse.Parsers;
 import in.simplifymoney.ledgersync.report.Reports;
+import in.simplifymoney.ledgersync.store.Backfill;
+import in.simplifymoney.ledgersync.store.ConsistencyChecker;
+import in.simplifymoney.ledgersync.store.DynamoDocumentStore;
 import in.simplifymoney.ledgersync.store.SqlLedgerStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -14,6 +17,8 @@ import java.nio.file.Path;
  *   migrate                  apply db/migration/*.sql
  *   ingest  <corpus.jsonl>   read a corpus into the ledger
  *   report  <out-dir>        write ledger.json, summary.json, reconciliation.json
+ *   backfill                 migrate SQL ledger into document store
+ *   check                    verify consistency between SQL and document store
  */
 public final class App {
 
@@ -22,7 +27,7 @@ public final class App {
 
     public static void main(String[] args) throws Exception {
         if (args.length == 0) {
-            System.err.println("usage: migrate | ingest <corpus.jsonl> | report <out-dir>");
+            System.err.println("usage: migrate | ingest <corpus.jsonl> | report <out-dir> | backfill | check");
             System.exit(2);
         }
         Files.createDirectories(DB.getParent());
@@ -57,6 +62,27 @@ public final class App {
                     Files.writeString(out.resolve("reconciliation.json"),
                             Json.writePretty(Reports.reconciliation(ledger)));
                     System.out.println("wrote 3 files to " + out);
+                }
+            }
+            case "backfill" -> {
+                try (SqlLedgerStore sql = new SqlLedgerStore(DB);
+                     DynamoDocumentStore doc = new DynamoDocumentStore()) {
+                    sql.migrate(MIGRATIONS);
+                    var result = new Backfill(sql, doc).run();
+                    System.out.println("backfill result: " + result);
+                }
+            }
+            case "check" -> {
+                try (SqlLedgerStore sql = new SqlLedgerStore(DB);
+                     DynamoDocumentStore doc = new DynamoDocumentStore()) {
+                    sql.migrate(MIGRATIONS);
+                    var divergences = new ConsistencyChecker(sql, doc).check();
+                    if (divergences.isEmpty()) {
+                        System.out.println("stores are consistent (0 divergences)");
+                    } else {
+                        System.out.println("found " + divergences.size() + " divergences:");
+                        for (var d : divergences) System.out.println("  " + d);
+                    }
                 }
             }
             default -> {

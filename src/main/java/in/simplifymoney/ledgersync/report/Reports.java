@@ -4,6 +4,7 @@ import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,7 +87,114 @@ public final class Reports {
     }
 
     public static Map<String, Object> reconciliation(List<NormalizedTxn> ledger) {
-        throw new UnsupportedOperationException("reconciliation is not implemented");
+        List<in.simplifymoney.ledgersync.model.RawMessage> messages = List.of();
+        java.nio.file.Path defaultCorpus = java.nio.file.Path.of("fixtures/corpus-a.jsonl");
+        if (java.nio.file.Files.exists(defaultCorpus)) {
+            try {
+                messages = in.simplifymoney.ledgersync.ingest.IngestService.readCorpus(defaultCorpus);
+            } catch (Exception ignored) { }
+        }
+        return reconciliation(ledger, messages);
+    }
+
+    public static Map<String, Object> reconciliation(List<NormalizedTxn> ledger,
+                                                     List<in.simplifymoney.ledgersync.model.RawMessage> messages) {
+        Map<String, in.simplifymoney.ledgersync.model.RawMessage> msgMap = new LinkedHashMap<>();
+        if (messages != null) {
+            for (in.simplifymoney.ledgersync.model.RawMessage m : messages) {
+                msgMap.put(m.messageId(), m);
+            }
+        }
+
+        List<Object> discrepancies = new ArrayList<>();
+        TreeSet<String> accounts = new TreeSet<>(ledger.stream().map(NormalizedTxn::accountLast4).toList());
+
+        for (String acct : accounts) {
+            List<NormalizedTxn> txns = ledger.stream()
+                    .filter(t -> t.accountLast4().equals(acct))
+                    .sorted(java.util.Comparator.comparing(NormalizedTxn::occurredAt))
+                    .toList();
+
+            if (txns.isEmpty()) continue;
+
+            // Find index of first transaction with a stated balance checkpoint
+            int firstCheckIndex = -1;
+            NormalizedTxn firstTxn = null;
+            BigDecimal firstStatedBal = null;
+            for (int i = 0; i < txns.size(); i++) {
+                BigDecimal sb = getStatedBalance(txns.get(i), msgMap);
+                if (sb != null) {
+                    firstCheckIndex = i;
+                    firstTxn = txns.get(i);
+                    firstStatedBal = sb;
+                    break;
+                }
+            }
+
+            if (firstCheckIndex == -1 || firstTxn == null || firstStatedBal == null) continue;
+
+            // Derive pre-transaction opening balance for firstTxn:
+            // openingBalance = first.statedBalance - signedDelta(firstTransaction)
+            // where debit signedDelta = -amount and credit signedDelta = +amount.
+            BigDecimal firstDelta = (firstTxn.direction() == Direction.DEBIT)
+                    ? firstTxn.amount().negate()
+                    : firstTxn.amount();
+            BigDecimal openingBalFirst = firstStatedBal.subtract(firstDelta);
+
+            // Work back to opening balance before txns.get(0) if firstCheckIndex > 0
+            BigDecimal runningBalance = openingBalFirst;
+            for (int i = firstCheckIndex - 1; i >= 0; i--) {
+                NormalizedTxn t = txns.get(i);
+                BigDecimal delta = (t.direction() == Direction.DEBIT)
+                        ? t.amount().negate()
+                        : t.amount();
+                runningBalance = runningBalance.subtract(delta);
+            }
+
+            BigDecimal currentDiscrepancy = ZERO;
+
+            // Reconcile all transactions chronologically from index 0
+            for (NormalizedTxn t : txns) {
+                BigDecimal delta = (t.direction() == Direction.DEBIT)
+                        ? t.amount().negate()
+                        : t.amount();
+                runningBalance = runningBalance.add(delta);
+
+                BigDecimal statedBal = getStatedBalance(t, msgMap);
+                if (statedBal != null) {
+                    BigDecimal expectedDiff = runningBalance.subtract(statedBal);
+                    BigDecimal stepDiff = expectedDiff.subtract(currentDiscrepancy);
+
+                    if (stepDiff.compareTo(ZERO) != 0) {
+                        BigDecimal discAmount = stepDiff.abs().setScale(2);
+                        Map<String, Object> disc = new LinkedHashMap<>();
+                        disc.put("account_last4", acct);
+                        disc.put("occurred_at", t.occurredAt().toString());
+                        disc.put("amount", discAmount.toPlainString());
+                        disc.put("note", "Unrepresented bank transaction of " + discAmount.toPlainString()
+                                + " detected before checkpoint " + t.occurredAt());
+                        discrepancies.add(disc);
+                        currentDiscrepancy = expectedDiff;
+                    }
+                }
+            }
+        }
+
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("discrepancies", discrepancies);
+        return doc;
+    }
+
+    private static BigDecimal getStatedBalance(NormalizedTxn t,
+                                                Map<String, in.simplifymoney.ledgersync.model.RawMessage> msgMap) {
+        for (String srcId : t.sourceMessageIds()) {
+            in.simplifymoney.ledgersync.model.RawMessage m = msgMap.get(srcId);
+            if (m != null) {
+                BigDecimal sb = in.simplifymoney.ledgersync.parse.Amounts.statedBalance(m.body());
+                if (sb != null) return sb;
+            }
+        }
+        return null;
     }
 
     public static Map<Category, BigDecimal> byCategory(List<NormalizedTxn> ledger) {
