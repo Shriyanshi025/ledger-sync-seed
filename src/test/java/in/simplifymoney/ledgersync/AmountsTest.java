@@ -39,6 +39,8 @@ class AmountsTest {
         assertEquals(new BigDecimal("89032.61"),
                 Amounts.statedBalance("Rs.2,499.50 debited from a/c **4821 on "
                         + "04-07-26 at 20:24 to AMAZON PAY. Avl Bal: Rs.89,032.61."));
+        assertEquals(null, Amounts.statedBalance(
+            "Rs 1,249.99 spent on HDFC Bank Card x3310. Avl Limit: Rs.196,250.03."));
     }
 
     @Test

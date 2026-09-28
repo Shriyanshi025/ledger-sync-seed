@@ -33,7 +33,13 @@ class DocumentStoreTest {
                 new BigDecimal("2000.00"), Category.INCOME, "SALARY", List.of("m2"));
 
         store.save(t1);
+        NormalizedTxn t1ExtraEvidence = new NormalizedTxn("4821", T1, Direction.DEBIT,
+            new BigDecimal("500.00"), Category.SPEND, "AMAZON", List.of("m1-extra"));
+        store.save(t1ExtraEvidence);
         store.save(t2);
+
+        assertEquals(List.of("m1", "m1-extra"),
+            store.byMessageId("m1-extra").orElseThrow().sourceMessageIds());
 
         // Q1: forAccountMonth (newest first)
         List<NormalizedTxn> monthTxns = store.forAccountMonth("4821", YearMonth.of(2026, 7));

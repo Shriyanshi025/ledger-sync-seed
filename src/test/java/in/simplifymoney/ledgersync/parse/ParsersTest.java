@@ -16,7 +16,7 @@ class ParsersTest {
     private final Parsers parsers = new Parsers();
 
     @Test
-    void parsesHdfcDebitSms() {
+    void parsesHdfcDebitSmsAndIgnoresCardAvailableLimit() {
         RawMessage m = new RawMessage(
                 "m-00004-f52f55", "sms", "AD-HDFCBK-S",
                 OffsetDateTime.parse("2026-07-01T11:52:00+05:30"), "dev-1",
@@ -31,6 +31,16 @@ class ParsersTest {
         assertEquals(new BigDecimal("99.99"), p.amount());
         assertEquals("BIGBASKET", p.merchant());
         assertEquals(new BigDecimal("93111.41"), p.statedBalance());
+
+        RawMessage card = new RawMessage(
+            "m-00018-20d234", "sms", "AD-HDFCBK-S",
+            OffsetDateTime.parse("2026-07-03T11:51:00+05:30"), "dev-1",
+            "Rs 1,249.99 spent on HDFC Bank Card x3310 at BLINKIT on 03-07-26 11:51. "
+                + "Avl Limit: Rs.196,250.03. Not you? Call 18002586161");
+        ParsedTxn cardTxn = parsers.parse(card).orElseThrow();
+        assertEquals("3310", cardTxn.accountLast4());
+        assertEquals(new BigDecimal("1249.99"), cardTxn.amount());
+        assertNull(cardTxn.statedBalance());
     }
 
     @Test

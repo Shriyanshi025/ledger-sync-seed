@@ -51,31 +51,31 @@ public final class HdfcSmsParser implements MessageParser {
             Direction d = v1.group("dir").startsWith("debited")
                     ? Direction.DEBIT : Direction.CREDIT;
             return build(m, v1.group("acct"), v1.group("when").replace(" at ", " "),
-                    d, v1.group("merchant"));
+                    d, v1.group("merchant"), true);
         }
 
         Matcher v2 = V2.matcher(body);
         if (v2.find()) {
             Direction d = "Sent".equals(v2.group("dir"))
                     ? Direction.DEBIT : Direction.CREDIT;
-            return build(m, v2.group("acct"), v2.group("when"), d, v2.group("merchant"));
+            return build(m, v2.group("acct"), v2.group("when"), d, v2.group("merchant"), true);
         }
 
         Matcher card = CARD.matcher(body);
         if (card.find()) {
             return build(m, card.group("acct"), card.group("when"),
-                    Direction.DEBIT, card.group("merchant"));
+                                        Direction.DEBIT, card.group("merchant"), false);
         }
 
         return Optional.empty();
     }
 
     private Optional<ParsedTxn> build(RawMessage m, String acct, String when,
-                                      Direction dir, String merchant) {
+                                      Direction dir, String merchant, boolean hasAccountBalance) {
         BigDecimal amount = Amounts.first(m.body());
         OffsetDateTime at = Dates.ist(when);
         if (amount == null || at == null) return Optional.empty();
         return Optional.of(new ParsedTxn(acct, at, dir, amount, merchant.trim(),
-                Amounts.statedBalance(m.body()), m.messageId()));
+                hasAccountBalance ? Amounts.statedBalance(m.body()) : null, m.messageId()));
     }
 }

@@ -10,18 +10,27 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * DynamoDB Local DocumentStore implementation using JDK standard HTTP & JSON,
@@ -32,6 +41,11 @@ public final class DynamoDocumentStore implements DocumentStore, AutoCloseable {
     private static final String TABLE_NAME = "LedgerTransactions";
     private static final String GSI1_NAME = "GSI1";
     private static final String GSI2_NAME = "GSI2";
+    private static final String LOCAL_ACCESS_KEY_ID = "local";
+    private static final String LOCAL_SECRET_ACCESS_KEY = "local";
+    private static final String AWS_REGION = "us-east-1";
+    private static final DateTimeFormatter AWS_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
     private final URI endpoint;
     private final HttpClient httpClient;
@@ -67,11 +81,7 @@ public final class DynamoDocumentStore implements DocumentStore, AutoCloseable {
 
     private boolean checkEndpointAvailable() {
         try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(endpoint)
-                    .header("Content-Type", "application/x-amz-json-1.0")
-                    .header("X-Amz-Target", "DynamoDB_20120810.ListTables")
-                    .POST(HttpRequest.BodyPublishers.ofString("{}"))
+            HttpRequest req = signedRequest("DynamoDB_20120810.ListTables", "{}")
                     .timeout(Duration.ofMillis(500))
                     .build();
             HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
@@ -131,12 +141,13 @@ public final class DynamoDocumentStore implements DocumentStore, AutoCloseable {
 
     @Override
     public void save(NormalizedTxn txn) {
-        internalStore.save(txn);
+        String dedupKey = SqlLedgerStore.computeDedupKey(txn);
+        NormalizedTxn storedTxn = isDynamoAvailable ? mergeExistingEvidence(txn, dedupKey) : txn;
+        internalStore.save(storedTxn);
         if (!isDynamoAvailable) return;
 
-        String dedupKey = SqlLedgerStore.computeDedupKey(txn);
         String ym = String.format("%04d-%02d", txn.occurredAt().getYear(), txn.occurredAt().getMonthValue());
-        String sortedSourceIds = String.join(",", new TreeSet<>(txn.sourceMessageIds()));
+        String sortedSourceIds = String.join(",", new TreeSet<>(storedTxn.sourceMessageIds()));
 
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("PK", Map.of("S", "ACCOUNT#" + txn.accountLast4()));
@@ -157,8 +168,10 @@ public final class DynamoDocumentStore implements DocumentStore, AutoCloseable {
                 "Item", item
         ));
 
-        for (String msgId : txn.sourceMessageIds()) {
+        for (String msgId : storedTxn.sourceMessageIds()) {
             Map<String, Object> msgItem = new LinkedHashMap<>(item);
+            msgItem.remove("GSI1_PK");
+            msgItem.remove("GSI1_SK");
             msgItem.put("PK", Map.of("S", "MSG#" + msgId));
             msgItem.put("SK", Map.of("S", "TXN#" + dedupKey));
             msgItem.put("GSI2_PK", Map.of("S", "MSG#" + msgId));
@@ -168,6 +181,34 @@ public final class DynamoDocumentStore implements DocumentStore, AutoCloseable {
                     "Item", msgItem
             ));
         }
+    }
+
+    private NormalizedTxn mergeExistingEvidence(NormalizedTxn txn, String dedupKey) {
+        String pk = "ACCOUNT#" + txn.accountLast4();
+        String sk = "TXN#" + txn.occurredAt().toString() + "#" + dedupKey;
+        Map<String, Object> response = sendDynamoRequest("DynamoDB_20120810.GetItem", Map.of(
+                "TableName", TABLE_NAME,
+                "ConsistentRead", true,
+                "Key", Map.of(
+                        "PK", Map.of("S", pk),
+                        "SK", Map.of("S", sk))));
+
+        Object rawItem = response.get("Item");
+        if (!(rawItem instanceof Map<?, ?> item)
+                || !(item.get("source_message_ids") instanceof Map<?, ?> sourceIds)
+                || !(sourceIds.get("S") instanceof String existingIds)) {
+            return txn;
+        }
+
+        TreeSet<String> mergedIds = new TreeSet<>(txn.sourceMessageIds());
+        Arrays.stream(existingIds.split(","))
+                .map(String::trim)
+                .filter(id -> !id.isEmpty())
+                .forEach(mergedIds::add);
+        if (mergedIds.size() == txn.sourceMessageIds().size()) return txn;
+
+        return new NormalizedTxn(txn.accountLast4(), txn.occurredAt(), txn.direction(),
+                txn.amount(), txn.category(), txn.merchant(), List.copyOf(mergedIds));
     }
 
     @Override
@@ -321,12 +362,7 @@ public final class DynamoDocumentStore implements DocumentStore, AutoCloseable {
     private Map<String, Object> sendDynamoRequest(String target, Map<String, Object> payload) {
         try {
             String json = Json.writePretty(payload);
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(endpoint)
-                    .header("Content-Type", "application/x-amz-json-1.0")
-                    .header("X-Amz-Target", target)
-                    .POST(HttpRequest.BodyPublishers.ofString(json))
-                    .build();
+            HttpRequest req = signedRequest(target, json).build();
             HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
                 if (isDynamoAvailable) {
@@ -341,6 +377,53 @@ public final class DynamoDocumentStore implements DocumentStore, AutoCloseable {
             }
             return Map.of();
         }
+    }
+
+    private HttpRequest.Builder signedRequest(String target, String payload)
+            throws GeneralSecurityException {
+        String timestamp = AWS_TIMESTAMP.format(Instant.now());
+        String date = timestamp.substring(0, 8);
+        String host = endpoint.getHost() + (endpoint.getPort() < 0 ? "" : ":" + endpoint.getPort());
+        String signedHeaders = "content-type;host;x-amz-date;x-amz-target";
+        String canonicalHeaders = "content-type:application/x-amz-json-1.0\n"
+                + "host:" + host + "\n"
+                + "x-amz-date:" + timestamp + "\n"
+                + "x-amz-target:" + target + "\n";
+        String canonicalUri = endpoint.getRawPath().isEmpty() ? "/" : endpoint.getRawPath();
+        String canonicalQuery = endpoint.getRawQuery() == null ? "" : endpoint.getRawQuery();
+        String canonicalRequest = "POST\n" + canonicalUri + "\n" + canonicalQuery + "\n"
+                + canonicalHeaders + "\n" + signedHeaders + "\n" + sha256Hex(payload);
+        String scope = date + "/" + AWS_REGION + "/dynamodb/aws4_request";
+        String stringToSign = "AWS4-HMAC-SHA256\n" + timestamp + "\n" + scope + "\n"
+                + sha256Hex(canonicalRequest);
+
+        byte[] dateKey = hmacSha256(("AWS4" + LOCAL_SECRET_ACCESS_KEY).getBytes(StandardCharsets.UTF_8), date);
+        byte[] regionKey = hmacSha256(dateKey, AWS_REGION);
+        byte[] serviceKey = hmacSha256(regionKey, "dynamodb");
+        byte[] signingKey = hmacSha256(serviceKey, "aws4_request");
+        String signature = HexFormat.of().formatHex(hmacSha256(signingKey, stringToSign));
+        String authorization = "AWS4-HMAC-SHA256 Credential=" + LOCAL_ACCESS_KEY_ID + "/" + scope
+                + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature;
+
+        return HttpRequest.newBuilder()
+                .uri(endpoint)
+                .header("Content-Type", "application/x-amz-json-1.0")
+                .header("X-Amz-Target", target)
+                .header("X-Amz-Date", timestamp)
+                .header("Authorization", authorization)
+                .POST(HttpRequest.BodyPublishers.ofString(payload));
+    }
+
+    private static String sha256Hex(String value) throws GeneralSecurityException {
+        byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(value.getBytes(StandardCharsets.UTF_8));
+        return HexFormat.of().formatHex(digest);
+    }
+
+    private static byte[] hmacSha256(byte[] key, String value) throws GeneralSecurityException {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return mac.doFinal(value.getBytes(StandardCharsets.UTF_8));
     }
 
     private NormalizedTxn parseTxn(Map<String, Object> item) {

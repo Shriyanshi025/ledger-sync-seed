@@ -37,3 +37,12 @@ This document discloses the use of AI coding assistants during the development o
 - **How Detected**: `ReportsTest.testFullCorpusAPhase4Verification()` failed due to false initial discrepancies before the true ₹7,500 gap.
 - **What Was Changed**: Updated `reconciliation()` to derive the pre-transaction opening balance from `openingBalance = first.statedBalance - signedDelta(firstTransaction)` and compare `runningBalance` against non-null stated balance checkpoints.
 - **How Verified**: `ReportsTest` passed, detecting only the exact ₹7,500 discrepancy for account 4821.
+
+---
+
+### AI Mistake 5: Treating Card Limits as Reconciliation Balances
+
+- **What the AI Got Wrong**: During the final audit, the AI initially proposed adding inferred reconciliation debits to summary spend. A fresh report showed that HDFC card `Avl Limit` values were being parsed as account balances, creating false discrepancies for account 3310; using those discrepancies in summary totals would have introduced unsupported financial adjustments.
+- **How Detected**: Ran the fresh migration, ingestion, and report pipeline; inspected the account 3310 source SMS bodies and traced `Avl Limit` through `Amounts.statedBalance()` into `Reports.reconciliation()`.
+- **What Was Changed**: Removed the summary adjustment. `Amounts.statedBalance()` no longer treats `Avl Limit` as an account balance, and card parsing leaves `statedBalance` null. The known ₹7,500 discrepancy remains separate from the canonical ledger and summary.
+- **How Verified**: Added assertions to existing parser, amount, and report tests. The clean suite completed with 58 tests, 0 failures; focused provenance, repeat-safe, amount, parser, report, and document-store suites passed. DynamoDB Local was exercised directly: first backfill wrote 266, replay wrote 0 and skipped 266, and `check` reported 0 divergences. A fresh CLI lifecycle produced 266 physical rows, 256 canonical rows, and only the expected ₹7,500 reconciliation discrepancy.

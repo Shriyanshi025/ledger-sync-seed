@@ -172,12 +172,13 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
         List<String> newSourceIds = t.sourceMessageIds() != null ? t.sourceMessageIds() : List.of();
 
         try (PreparedStatement selectPs = conn.prepareStatement(
-                "SELECT id, source_message_ids FROM ledger WHERE dedup_key = ?")) {
+                "SELECT id, source_message_ids, source_kind FROM ledger WHERE dedup_key = ?")) {
             selectPs.setString(1, key);
             try (ResultSet rs = selectPs.executeQuery()) {
                 if (rs.next()) {
                     long existingId = rs.getLong("id");
                     String existingSourceIdsStr = rs.getString("source_message_ids");
+                    String existingSourceKind = rs.getString("source_kind");
                     List<String> existingList = existingSourceIdsStr != null
                             ? Arrays.stream(existingSourceIdsStr.split(","))
                                 .map(String::trim)
@@ -191,9 +192,12 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
                     String newMergedSourceIdsStr = String.join(",", combinedList);
 
-                    if (!newMergedSourceIdsStr.equals(existingSourceIdsStr)) {
+                    if (!newMergedSourceIdsStr.equals(existingSourceIdsStr)
+                            || "LEGACY".equals(existingSourceKind)) {
                         try (PreparedStatement updatePs = conn.prepareStatement(
-                                "UPDATE ledger SET source_message_ids = ?, category = ?, merchant = ? WHERE id = ?")) {
+                                "UPDATE ledger SET source_message_ids = ?, category = ?, merchant = ?,"
+                                        + " source_kind = CASE WHEN source_kind = 'LEGACY' THEN 'CORPUS' ELSE source_kind END"
+                                        + " WHERE id = ?")) {
                             updatePs.setString(1, newMergedSourceIdsStr);
                             updatePs.setString(2, t.category().name());
                             updatePs.setString(3, t.merchant());
@@ -259,7 +263,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
              ResultSet rs = st.executeQuery(
                      "SELECT account_last4, occurred_at, direction, amount, category,"
                              + " merchant, source_message_ids FROM ledger"
-                             + " WHERE source_kind IN ('CORPUS', 'INCIDENT_EVIDENCE')"
+                             + " WHERE source_kind = 'CORPUS'"
                              + " ORDER BY occurred_at")) {
             while (rs.next()) {
                 out.add(new NormalizedTxn(

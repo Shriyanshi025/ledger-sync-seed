@@ -191,6 +191,7 @@ class ReportsTest {
         Map<String, Object> reconDoc = Reports.reconciliation(ledger);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> discrepancies = (List<Map<String, Object>>) reconDoc.get("discrepancies");
+        assertEquals(1, discrepancies.size(), "Only the known unrepresented bank transaction should remain");
         List<Map<String, Object>> disc4821 = discrepancies.stream()
                 .filter(d -> "4821".equals(d.get("account_last4")))
                 .toList();
